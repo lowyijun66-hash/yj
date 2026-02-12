@@ -1,0 +1,16 @@
+name = "media-api"
+account_id = "f1800f13536872f331fd2a7733487b03"
+main = "media-api.js"
+compatibility_date = "2024-11-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "vhs-meta"
+database_id = "c096fc10-7b4f-41dd-a0e4-cb19de9ddbf5"
+
+[[r2_buckets]]
+binding = "R2"
+bucket_name = "portfolio-assets"
+
+[vars]
+PUBLIC_R2_BASE = "https://pub-784f804eae814ced8bd402fd02b5d92f.r2.dev/"

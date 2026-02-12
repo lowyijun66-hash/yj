@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Yijun Records</title>
+<link href="https://fonts.googleapis.com/css2?family=VT323&display=swap" rel="stylesheet">
+
+<style>
+  @font-face {
+    font-family: 'Cubic11';
+    src: url('/assets/fonts/Cubic_11.ttf') format('truetype');
+  }
+
+  html, body {
+    margin: 0; padding: 0;
+    width: 100%; height: 100%;
+    overflow: hidden;
+    font-family: 'Cubic11', monospace;
+    color: #ddd;
+    position: relative;
+  }
+
+  #bg-video {
+    position: fixed;
+    top: 50%; left: 50%;
+    min-width: 100%; min-height: 100%;
+    transform: translate(-50%, -50%);
+    object-fit: cover;
+    z-index: -2;
+    pointer-events: none;
+  }
+
+  #overlay-glow {
+    position: fixed; top:0; left:0; width:100%; height:100%;
+    background: rgba(0,0,0,0.3);
+    mix-blend-mode: multiply;
+    z-index: -1;
+  }
+
+  #lang-toggle {
+    position: absolute;
+    top: 15px; right: 15px;
+    z-index: 3;
+  }
+
+  #lang-toggle button {
+    font-family: 'Cubic11', monospace;
+    font-size: 0.8em;
+    margin-left: 5px;
+    padding: 3px 10px;
+    background: transparent;
+    border: 1px solid #ddd;
+    color: #ddd;
+    cursor: pointer;
+    text-shadow: 0 0 2px #ddd;
+    transition: all .12s ease-in-out;
+  }
+
+  #lang-toggle button:hover {
+    font-weight: bold;
+    text-shadow: 0 0 3px #fff, 0 0 5px #aaa;
+  }
+
+  #start-screen {
+    position: absolute; width:100%; height:100%;
+    display: flex; flex-direction: column;
+    justify-content: center; align-items: center;
+    z-index: 2; text-align: center;
+  }
+
+  h2 {
+    font-size: 4em;
+    letter-spacing: 2px;
+    text-shadow: 0 0 5px #ddd, 0 0 10px #ddd;
+    margin-bottom: 10px;
+    animation: flickerText 1.5s infinite;
+    text-transform: uppercase;
+  }
+
+  .menu { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; }
+  .menu button {
+    font-size: 1.5em;
+    font-family: 'Cubic11', monospace;
+    margin: 4px; padding: 8px 30px;
+    background: transparent; border: none;
+    color: #ddd; cursor: pointer;
+    text-shadow: 0 0 3px #ddd;
+    transition: all .12s ease-in-out;
+    position: relative;
+    overflow: hidden;
+  }
+
+  /* Subtle light flicker effect on hover */
+  .menu button:hover {
+    font-weight: bold;
+    animation: lightFlicker 1.2s infinite;
+  }
+
+  /* Mild glitch effect - subtle position shifts */
+  .menu button:hover::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(
+      90deg,
+      transparent,
+      rgba(255, 255, 255, 0.05),
+      transparent
+    );
+    animation: mildGlitch 1.5s infinite;
+    z-index: -1;
+  }
+
+  @keyframes lightFlicker {
+    0%, 100% { opacity: 1; text-shadow: 0 0 3px #ddd, 0 0 6px #ccc; }
+    5% { opacity: 0.95; text-shadow: 0 0 2px #ddd, 0 0 4px #bbb; }
+    10% { opacity: 1; text-shadow: 0 0 3px #ddd, 0 0 6px #ccc; }
+    50% { opacity: 0.94; text-shadow: 0 0 1.5px #ddd, 0 0 4px #aaa; }
+    60% { opacity: 1; text-shadow: 0 0 3px #ddd, 0 0 6px #ccc; }
+  }
+
+  @keyframes mildGlitch {
+    0%, 100% { transform: translateX(0); opacity: 0.3; }
+    15% { transform: translateX(-0.5px); opacity: 0.4; }
+    30% { transform: translateX(0.3px); opacity: 0.2; }
+    45% { transform: translateX(0.5px); opacity: 0.35; }
+    60% { transform: translateX(-0.3px); opacity: 0.25; }
+    75% { transform: translateX(0.2px); opacity: 0.4; }
+    90% { transform: translateX(-0.2px); opacity: 0.3; }
+  }
+
+  @keyframes flickerText{
+    0%,100%{opacity:1}10%{opacity:.8}30%{opacity:.85}50%{opacity:1}
+  }
+
+  @media(max-width:768px){
+    h2{font-size:2.5em} 
+    .menu button{font-size:1.1em;padding:6px 25px} 
+    #lang-toggle button{font-size:.7em}
+  }
+  @media(max-width:480px){
+    h2{font-size:1.8em} 
+    .menu button{font-size:.9em;padding:5px 18px} 
+    #lang-toggle button{font-size:.6em}
+  }
+</style>
+</head>
+
+<body>
+<div id="lang-toggle">
+  <button id="btn-en">English</button>
+  <button id="btn-zh">中文</button>
+</div>
+
+<video id="bg-video" autoplay muted loop>
+  <source src="/assets/video/vhs_overlay.mp4" type="video/mp4">
+</video>
+<audio id="bg-music" loop>
+  <source src="/assets/audio/static.mp3" type="audio/mp3">
+</audio>
+<div id="overlay-glow"></div>
+
+<div id="start-screen">
+  <h2 id="title">YIJUN RECORDS</h2>
+  <div class="menu">
+    <button id="btn-start">PRESS TO START</button>
+    <button id="btn-resume">RESUME</button>
+  </div>
+</div>
+
+<script>
+// Logic to handle Start/Resume
+document.addEventListener('DOMContentLoaded', function() {
+  const btnStart = document.getElementById('btn-start');
+  const btnResume = document.getElementById('btn-resume');
+  const SAVE_KEY = 'vhs_save_data';
+
+  // Check if save exists
+  const hasSave = localStorage.getItem(SAVE_KEY);
+  
+  if (!hasSave) {
+    btnResume.style.display = 'none';
+  } else {
+    btnResume.addEventListener('click', function() {
+      window.location.href = 'walkthrough/';
+    });
+  }
+
+  btnStart.addEventListener('click', function() {
+    // Clear old save for a fresh start
+    localStorage.removeItem(SAVE_KEY);
+    window.location.href = 'walkthrough/';
+  });
+
+  // Language Logic
+  const title = document.getElementById("title");
+  const LANG_KEY = 'vhs_lang';
+  
+  function setLanguage(lang) {
+    localStorage.setItem(LANG_KEY, lang);
+    if (lang === 'zh') {
+      title.textContent = "异君录";
+      btnStart.textContent = "开机";
+      btnResume.textContent = "续播";
+    } else {
+      title.textContent = "YIJUN RECORDS";
+      btnStart.textContent = "PRESS TO START";
+      btnResume.textContent = "RESUME";
+    }
+  }
+  
+  // Init Lang
+  const savedLang = localStorage.getItem(LANG_KEY) || 'en';
+  setLanguage(savedLang);
+
+  document.getElementById("btn-en").addEventListener("click", () => setLanguage('en'));
+  document.getElementById("btn-zh").addEventListener("click", () => setLanguage('zh'));
+
+  // Audio Autoplay Handling
+  const audio = document.getElementById('bg-music');
+  audio.volume = 0.3; // Set volume to 30% to not blast ears
+
+  // Try to play immediately
+  const playPromise = audio.play();
+
+  if (playPromise !== undefined) {
+    playPromise.catch(error => {
+      console.log("Autoplay prevented. Waiting for user interaction.");
+      // Auto-play prevented. Wait for first interaction.
+      const startAudio = () => {
+        audio.play();
+        document.removeEventListener('click', startAudio);
+        document.removeEventListener('keydown', startAudio);
+      };
+      document.addEventListener('click', startAudio);
+      document.addEventListener('keydown', startAudio);
+    });
+  }
+});
+</script>
+</body>
+</html>

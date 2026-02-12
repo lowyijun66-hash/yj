@@ -1,0 +1,576 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Yijun Records - Room 1</title>
+<link href="https://fonts.googleapis.com/css2?family=VT323&display=swap" rel="stylesheet">
+<style>
+  @font-face {
+    font-family: 'Cubic11';
+    src: url('../../public/assets/fonts/Cubic_11.ttf') format('truetype');
+  }
+
+  html, body {
+    margin: 0; padding: 0;
+    width: 100%; height: 100%;
+    overflow: hidden;
+    font-family: 'Cubic11', monospace;
+    color: #ddd;
+    background: #000;
+  }
+
+  #room3D { width:100%; height:100%; display:block; }
+
+  #loading{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:lime;background:#000c;padding:15px;border-radius:6px;display:block;z-index:100}
+  #status{position:absolute;bottom:20px;left:20px;color:white;background:#000b;padding:10px;border-radius:6px;display:block;z-index:100}
+  #objective-display {
+    position: absolute;
+    top: 20px; right: 20px;
+    background: rgba(0,0,0,0.6);
+    padding: 15px;
+    border-radius: 4px;
+    border: 1px solid #444;
+    text-align: right;
+  }
+  #interaction-prompt {
+    position: absolute;
+    top: 60%; left: 50%;
+    transform: translate(-50%, 0);
+    color: white;
+    background: rgba(0, 0, 0, 0.73);
+    padding: 10px 15px;
+    border-radius: 6px;
+    display: none;
+    z-index: 100;
+    pointer-events: none;
+    font-size: 1.2em;
+    text-shadow: 0 0 2px #fff;
+  }
+
+  .progress-bar{width:300px;height:20px;background:#333;margin-top:10px;border-radius:10px;overflow:hidden}
+  .progress-fill{height:100%;background:linear-gradient(90deg,#0f0,#0c0);width:0%;transition:width .25s}
+
+  #btn-back {
+    position: fixed;
+    top: 20px; left: 20px;
+    font-family: 'Cubic11', monospace;
+    font-size: 1.5em;
+    background: rgba(0, 0, 0, 0.5);
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    color: #ddd;
+    cursor: pointer;
+    text-shadow: 0 0 3px #ddd;
+    z-index: 9999;
+    padding: 10px 20px;
+    transition: all 0.2s;
+    pointer-events: auto;
+  }
+  #btn-back:hover {
+    font-weight: bold;
+    text-shadow: 0 0 5px #fff;
+    transform: translateX(-3px);
+    background: rgba(0, 0, 0, 0.8);
+  }
+  #blocker {
+    position: absolute;
+    width: 100%; height: 100%;
+    background-color: rgba(0,0,0,0.5);
+    z-index: 50;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    flex-direction: column;
+    cursor: pointer;
+  }
+  #instructions {
+    font-size: 2em;
+    color: white;
+    text-align: center;
+    text-shadow: 0 0 5px #000;
+  }
+</style>
+</head>
+
+<body>
+
+<div id="blocker">
+  <div id="instructions">
+    <span style="font-size:36px">CLICK TO START</span><br/><br/>
+    (WASD to Move, Mouse to Look)
+  </div>
+</div>
+
+<div id="room3D"></div>
+<button id="btn-back">← EXIT ROOM</button>
+<div id="objective-display">
+  <div style="color:#aaa; font-size:0.8em">CURRENT OBJECTIVE</div>
+  <div style="color:#fff; font-size:1.2em">Find the Cassette Tape</div>
+</div>
+<div id="loading">
+  <div id="loading-text">Loading Room…</div>
+  <div class="progress-bar"><div id="progress-fill" class="progress-fill"></div></div>
+</div>
+<div id="interaction-prompt">COLLECT (F)</div>
+<div id="status">WASD to move • SHIFT to sprint • F to interact</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js';
+import { GLTFLoader } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/loaders/GLTFLoader.js';
+import { PointerLockControls } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/controls/PointerLockControls.js';
+import { CONFIG } from '/src/js/config.js';
+
+// Configuration
+const ROOM_SLUG = 'room-1';
+let ROOM_MODEL_URL = '/assets/models/neighbourhood.glb';
+let ROOM_ITEMS = []; // [{id,title,type,mediaUrl,position,rotation,scale,isObjective,objectiveText}]
+
+let scene, camera, renderer, controls;
+let moveForward = false, moveBackward = false, moveLeft = false, moveRight = false;
+let isSprinting = false;
+
+// Physics
+let velocity = new THREE.Vector3();
+let direction = new THREE.Vector3();
+const playerHeight = 1.3;
+const gravity = 30;
+const walkSpeed = 4;
+const sprintSpeed = 8;
+
+let raycaster;
+let worldMeshes = [];
+let interactiveObjects = [];
+let clock = new THREE.Clock();
+
+const loadingDiv = document.getElementById('loading');
+const loadingText = document.getElementById('loading-text');
+const progressFill = document.getElementById('progress-fill');
+const interactionPrompt = document.getElementById('interaction-prompt');
+
+function updateLoading(text, percent=0){
+  loadingText.textContent=text;
+  progressFill.style.width=percent+'%';
+}
+
+async function init(){
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x87CEEB); // Sky blue for outdoor feel
+  scene.fog = new THREE.Fog(0x87CEEB, 0, 50);
+
+  camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, .1, 1000);
+  camera.position.set(0, 10, 0); // Start high to fall to ground
+  camera.rotation.set(0, 0, 0);
+  camera.up.set(0, 1, 0);
+  camera.lookAt(0, 10, -100); // Look forward
+
+  renderer = new THREE.WebGLRenderer({antialias:true});
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio,2));
+  document.getElementById('room3D').appendChild(renderer.domElement);
+
+  // Lighting
+  const ambient = new THREE.AmbientLight(0xffffff, 0.5);
+  const dir = new THREE.DirectionalLight(0xffffff, 1.0);
+  dir.position.set(50, 100, 50);
+  dir.castShadow = true;
+  scene.add(ambient, dir);
+
+  controls = new PointerLockControls(camera, renderer.domElement);
+  
+  const blocker = document.getElementById('blocker');
+  const instructions = document.getElementById('instructions');
+
+  blocker.addEventListener('click', () => {
+    controls.lock();
+  });
+
+  controls.addEventListener('lock', () => {
+    instructions.style.display = 'none';
+    blocker.style.display = 'none';
+  });
+
+  controls.addEventListener('unlock', () => {
+    blocker.style.display = 'flex';
+    instructions.style.display = 'block';
+  });
+
+  raycaster = new THREE.Raycaster(new THREE.Vector3(), new THREE.Vector3(0, -1, 0), 0, 10);
+
+  // Controls
+  const onKeyDown = (event) => {
+    switch (event.code) {
+      case 'ArrowUp': case 'KeyW': moveForward = true; break;
+      case 'ArrowLeft': case 'KeyA': moveLeft = true; break;
+      case 'ArrowDown': case 'KeyS': moveBackward = true; break;
+      case 'ArrowRight': case 'KeyD': moveRight = true; break;
+      case 'ShiftLeft': case 'ShiftRight': isSprinting = true; break;
+      case 'KeyF': attemptInteract(); break;
+    }
+  };
+  const onKeyUp = (event) => {
+    switch (event.code) {
+      case 'ArrowUp': case 'KeyW': moveForward = false; break;
+      case 'ArrowLeft': case 'KeyA': moveLeft = false; break;
+      case 'ArrowDown': case 'KeyS': moveBackward = false; break;
+      case 'ArrowRight': case 'KeyD': moveRight = false; break;
+      case 'ShiftLeft': case 'ShiftRight': isSprinting = false; break;
+    }
+  };
+  // FIX: Attach to window instead of document to ensure focus isn't an issue
+  window.addEventListener('keydown', onKeyDown);
+  window.addEventListener('keyup', onKeyUp);
+
+  document.getElementById('btn-back').addEventListener('click', () => {
+    if(controls) controls.unlock();
+    window.location.href = '../index.html';
+  });
+
+  window.addEventListener('resize', onResize);
+
+  await loadData();
+  loadScene();
+  animate();
+}
+
+async function loadData(){
+  try {
+    const res = await fetch(`/api/rooms/${ROOM_SLUG}`);
+    if (res.ok) {
+      const { room, items } = await res.json();
+      if (room?.modelUrl) ROOM_MODEL_URL = room.modelUrl;
+    ROOM_ITEMS = (items || []).map(it => ({
+        id: it.id,
+        title: it.title,
+        type: it.type,
+        mediaUrl: it.media_url || it.mediaUrl || '',
+        position: it.transform ? JSON.parse(it.transform).position : it.position || {x:0,y:1,z:0},
+        rotation: it.transform ? JSON.parse(it.transform).rotation : it.rotation || {x:0,y:0,z:0},
+        scale: (() => { const s = it.transform ? JSON.parse(it.transform).scale : it.scale; if (typeof s === 'number') return {x:s,y:s,z:s}; return s || {x:1,y:1,z:1}; })(),
+        isObjective: !!(it.isObjective || it.objective),
+        objectiveText: it.objective_text || it.objectiveText || ''
+      }));
+      const current = ROOM_ITEMS.find(i => i.isObjective);
+      if (current?.objectiveText) {
+        document.querySelector('#objective-display div:nth-child(2)').textContent = current.objectiveText;
+      }
+      return;
+    }
+  } catch(e) {
+    console.warn('Room API unavailable, using defaults', e);
+  }
+  ROOM_ITEMS = [{
+    id: 'cassette-1',
+    title: 'Cassette',
+    type: 'collectible',
+    mediaUrl: '',
+    position: { x: 5, y: 1.5, z: -8 },
+    rotation: { x: 0, y: 0, z: 0 },
+    scale: { x: 5, y: 5, z: 5 },
+    isObjective: true,
+    objectiveText: 'Find the Cassette Tape'
+  }];
+}
+
+function loadScene(){
+  const loader = new GLTFLoader();
+  
+  Promise.all([
+    loader.loadAsync(CONFIG.resolveAsset(ROOM_MODEL_URL))
+  ]).then(([roomGltf]) => {
+    updateLoading("Building environment...", 90);
+    
+    // Setup Room
+    const roomModel = roomGltf.scene;
+    scene.add(roomModel);
+    roomModel.traverse(child => {
+      if(child.isMesh) {
+        worldMeshes.push(child);
+        child.castShadow = true;
+        child.receiveShadow = true;
+      }
+    });
+
+    // Load Items
+    ROOM_ITEMS.forEach(async (item) => {
+      try {
+        let itemModel = null;
+        if (item.type === 'collectible' || item.type === 'cassette') {
+          const gltf = await loader.loadAsync('/assets/models/cassette_tape.glb');
+          itemModel = gltf.scene;
+        } else {
+          // For media-only items, we still create a simple placeholder
+          const gltf = await loader.loadAsync('/assets/models/cassette_tape.glb');
+          itemModel = gltf.scene;
+        }
+        itemModel.position.set(item.position.x, item.position.y, item.position.z);
+        const s = (typeof item.scale === 'number') ? { x: item.scale, y: item.scale, z: item.scale } : item.scale;
+        itemModel.scale.set(s.x ?? 1, s.y ?? 1, s.z ?? 1);
+        itemModel.rotation.set(item.rotation.x, item.rotation.y, item.rotation.z);
+        scene.add(itemModel);
+
+        const collider = new THREE.Mesh(
+          new THREE.BoxGeometry(1, 1, 1),
+          new THREE.MeshBasicMaterial({visible: false})
+        );
+        collider.position.copy(itemModel.position);
+        collider.userData = { type: 'item', id: item.id, objective: !!item.isObjective, mediaUrl: item.mediaUrl, mediaType: item.type, title: item.title };
+        scene.add(collider);
+        interactiveObjects.push(collider);
+
+        if (item.isObjective) window.rotatingItem = itemModel;
+      } catch(e) {
+        console.warn('Failed to load item model', e);
+      }
+    });
+
+    updateLoading("Ready!", 100);
+    setTimeout(()=>loadingDiv.style.display='none', 500);
+
+  }).catch(err => {
+    console.error(err);
+    updateLoading("Failed to load assets", 0);
+  });
+}
+
+function attemptInteract(){
+  const rayDir = new THREE.Vector3();
+  camera.getWorldDirection(rayDir);
+  raycaster.ray.origin.copy(camera.position);
+  raycaster.ray.direction.copy(rayDir);
+  raycaster.far = 3.0;
+  
+  const hits = raycaster.intersectObjects(interactiveObjects, true);
+  if(hits.length > 0){
+    const ud = hits[0].object.userData;
+    if(ud.type === 'item'){
+        if (ud.mediaUrl && (ud.mediaType === 'pdf' || ud.mediaType === 'video' || ud.mediaType === 'image' || ud.mediaType === 'link')) {
+          openViewer(ud);
+        } else if (ud.objective) {
+          completeObjective();
+        }
+    }
+  }
+}
+
+function openViewer(ud){
+  const overlay = document.createElement('div');
+  overlay.style.position = 'fixed';
+  overlay.style.top = '0';
+  overlay.style.left = '0';
+  overlay.style.width = '100%';
+  overlay.style.height = '100%';
+  overlay.style.background = 'rgba(0,0,0,0.8)';
+  overlay.style.zIndex = '10000';
+  overlay.style.display = 'flex';
+  overlay.style.alignItems = 'center';
+  overlay.style.justifyContent = 'center';
+
+  const box = document.createElement('div');
+  box.style.background = '#111';
+  box.style.border = '1px solid #444';
+  box.style.borderRadius = '6px';
+  box.style.width = '80%';
+  box.style.height = '80%';
+  box.style.position = 'relative';
+  box.style.display = 'flex';
+  box.style.alignItems = 'center';
+  box.style.justifyContent = 'center';
+
+  const closeBtn = document.createElement('button');
+  closeBtn.textContent = 'Close';
+  closeBtn.style.position = 'absolute';
+  closeBtn.style.top = '10px';
+  closeBtn.style.right = '10px';
+  closeBtn.style.zIndex = '10001';
+  closeBtn.onclick = () => {
+    document.body.removeChild(overlay);
+    // After viewing, allow progressing objective if flagged
+    if (ud.objective) completeObjective();
+  };
+
+  let content;
+  if (ud.mediaType === 'pdf' || (ud.mediaUrl && ud.mediaUrl.endsWith('.pdf'))) {
+    content = document.createElement('iframe');
+    content.src = ud.mediaUrl;
+    content.style.width = '100%';
+    content.style.height = '100%';
+  } else if (ud.mediaType === 'video') {
+    content = document.createElement('video');
+    content.src = ud.mediaUrl;
+    content.controls = true;
+    content.style.maxWidth = '100%';
+    content.style.maxHeight = '100%';
+  } else if (ud.mediaType === 'image') {
+    content = document.createElement('img');
+    content.src = ud.mediaUrl;
+    content.style.maxWidth = '100%';
+    content.style.maxHeight = '100%';
+  } else {
+    content = document.createElement('a');
+    content.href = ud.mediaUrl;
+    content.target = '_blank';
+    content.textContent = 'Open link';
+    content.style.color = '#0bf';
+  }
+
+  box.appendChild(closeBtn);
+  box.appendChild(content);
+  overlay.appendChild(box);
+  document.body.appendChild(overlay);
+}
+
+function completeObjective(){
+    // Update progress in LocalStorage
+    const PROGRESS_KEY = 'vhs_progress';
+    let progress = { completedRoomIds: [], nextDoorIndex: 0, totalRooms: 0 };
+    try {
+        const stored = localStorage.getItem(PROGRESS_KEY);
+        if(stored) progress = JSON.parse(stored);
+    } catch(e){}
+
+    if(!progress.completedRoomIds.includes(ROOM_ID)){
+        progress.completedRoomIds.push(ROOM_ID);
+        // Save back
+        localStorage.setItem(PROGRESS_KEY, JSON.stringify(progress));
+    }
+
+    alert("Objective Collected! Returning to Hub...");
+    if(controls) controls.unlock();
+    window.location.href = '../';
+}
+
+function onResize(){
+  camera.aspect=window.innerWidth/window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth,window.innerHeight);
+}
+
+function animate(){
+  requestAnimationFrame(animate);
+  const delta = clock.getDelta();
+
+  if(controls.isLocked){
+      // Rotate Item
+      if(window.rotatingItem) window.rotatingItem.rotation.y += delta;
+
+      // Physics Movement (Same as Hub)
+      velocity.x -= velocity.x * 10.0 * delta;
+      velocity.z -= velocity.z * 10.0 * delta;
+      velocity.y -= gravity * delta;
+
+      direction.z = Number(moveForward) - Number(moveBackward);
+      direction.x = Number(moveRight) - Number(moveLeft);
+      direction.normalize();
+
+      const currentSpeed = isSprinting ? sprintSpeed : walkSpeed;
+      if (moveForward || moveBackward) velocity.z -= direction.z * currentSpeed * delta * 10;
+      if (moveLeft || moveRight) velocity.x -= direction.x * currentSpeed * delta * 10;
+
+      // Collision Logic
+      const originalPos = camera.position.clone();
+      
+      // Helper for wall collision
+      const checkWall = (start, end) => {
+          // If worldMeshes is empty, we can't collide
+          if(worldMeshes.length === 0) return false;
+
+          const dir = new THREE.Vector3().subVectors(end, start);
+          const dist = dir.length();
+          if (dist < 0.001) return false;
+          
+          dir.normalize();
+          raycaster.ray.origin.copy(start);
+          raycaster.ray.origin.y -= 0.5; // Check at torso level
+          raycaster.ray.direction.copy(dir);
+          raycaster.far = dist + 0.3; // Check movement + buffer
+          
+          const hits = raycaster.intersectObjects(worldMeshes, true);
+          if (hits.length > 0) {
+             // Check if it's a floor/slope (y normal > 0.5)
+             if(hits[0].face && hits[0].face.normal.y > 0.5){
+                 return false;
+             }
+             return true;
+          }
+          return false;
+      };
+
+      controls.moveRight(-velocity.x * delta);
+      if (checkWall(originalPos, camera.position)) {
+          camera.position.x = originalPos.x;
+          camera.position.z = originalPos.z;
+          velocity.x = 0;
+      }
+      
+      const posAfterX = camera.position.clone();
+      controls.moveForward(-velocity.z * delta);
+      if (checkWall(posAfterX, camera.position)) {
+          camera.position.x = posAfterX.x;
+          camera.position.z = posAfterX.z;
+          velocity.z = 0;
+      }
+
+      camera.position.y += velocity.y * delta;
+
+      // 3. Floor/Void Check
+      const rayOriginY = camera.position.y - (playerHeight - 0.5);
+      raycaster.ray.origin.copy(camera.position);
+      raycaster.ray.origin.y = rayOriginY;
+      raycaster.ray.direction.set(0, -1, 0);
+      raycaster.far = 10;
+      
+      const intersections = raycaster.intersectObjects(worldMeshes, true);
+      
+      if (intersections.length > 0) {
+          const distanceToFloor = intersections[0].distance;
+          const targetY = (rayOriginY - distanceToFloor) + playerHeight;
+          
+          if (velocity.y <= 0) {
+              camera.position.y = targetY;
+              velocity.y = Math.max(0, velocity.y);
+          }
+      } else {
+        // Fallback floor at y=0 if no mesh is found immediately
+        // This prevents falling through the floor before the model loads or if holes exist
+        if(camera.position.y < playerHeight && velocity.y < 0){
+             camera.position.y = playerHeight;
+             velocity.y = 0;
+        }
+      }
+      
+      if (camera.position.y < -20) {
+          // Respawn if fell out of world
+          camera.position.set(0, playerHeight, 0);
+          velocity.y = 0;
+      }
+
+      // Interaction Prompt Logic
+      const rayDir = new THREE.Vector3();
+      camera.getWorldDirection(rayDir);
+      raycaster.ray.origin.copy(camera.position);
+      raycaster.ray.direction.copy(rayDir);
+      raycaster.far = 3.0;
+      const hits = raycaster.intersectObjects(interactiveObjects, true);
+      
+      if(hits.length > 0 && hits[0].object.userData.objective){
+          interactionPrompt.style.display = 'block';
+      } else {
+          interactionPrompt.style.display = 'none';
+      }
+  }
+
+  renderer.render(scene, camera);
+}
+
+init();
+</script>
+</body>
+</html>

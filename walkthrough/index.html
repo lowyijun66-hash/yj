@@ -1,0 +1,666 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Yijun Records Walkthrough</title>
+<link href="https://fonts.googleapis.com/css2?family=VT323&display=swap" rel="stylesheet">
+
+<style>
+  @font-face {
+    font-family: 'Cubic11';
+    src: url('/assets/fonts/Cubic_11.ttf') format('truetype');
+  }
+
+  html, body {
+    margin: 0; padding: 0;
+    width: 100%; height: 100%;
+    overflow: hidden;
+    font-family: 'Cubic11', monospace;
+    color: #ddd;
+    background: #000;
+  }
+
+  #room3D { width:100%; height:100%; display:block; }
+
+  #loading{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:lime;background:#000c;padding:15px;border-radius:6px;display:block;z-index:100}
+  #status{position:absolute;bottom:20px;left:20px;color:white;background:#000b;padding:10px;border-radius:6px;display:block;z-index:100}
+
+  .progress-bar{width:300px;height:20px;background:#333;margin-top:10px;border-radius:10px;overflow:hidden}
+  .progress-fill{height:100%;background:linear-gradient(90deg,#0f0,#0c0);width:0%;transition:width .25s}
+
+  #btn-back {
+    position: fixed;
+    top: 20px; left: 20px;
+    font-family: 'Cubic11', monospace;
+    font-size: 1.5em;
+    background: rgba(0, 0, 0, 0.5);
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    color: #ddd;
+    cursor: pointer;
+    text-shadow: 0 0 3px #ddd;
+    z-index: 9999;
+    padding: 10px 20px;
+    transition: all 0.2s;
+    pointer-events: auto;
+  }
+  #btn-back:hover {
+    font-weight: bold;
+    text-shadow: 0 0 5px #fff;
+    transform: translateX(-3px);
+    background: rgba(0, 0, 0, 0.8);
+  }
+
+  #interaction-prompt {
+    position: absolute;
+    top: 60%; left: 50%;
+    transform: translate(-50%, 0);
+    color: white;
+    background: rgba(0, 0, 0, 0.73); /* Same as #status #000b approx */
+    padding: 10px 15px;
+    border-radius: 6px;
+    display: none;
+    z-index: 100;
+    pointer-events: none;
+    font-size: 1.2em;
+    text-shadow: 0 0 2px #fff;
+  }
+</style>
+</head>
+
+<body>
+
+<div id="room3D"></div>
+<button id="btn-back">← BACK</button>
+<div id="loading">
+  <div id="loading-text">Initializing…</div>
+  <div class="progress-bar"><div id="progress-fill" class="progress-fill"></div></div>
+</div>
+<div id="interaction-prompt">OPEN (F)</div>
+<div id="status">Click to look around • WASD to move • SHIFT to sprint • F to interact</div>
+
+<audio id="static-sound" loop>
+  <source src="/assets/audio/static.mp3" type="audio/mp3">
+</audio>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"
+  }
+}
+</script>
+
+<!-- Module script for 3D functionality -->
+<script type="module">
+import { CONFIG } from '/src/js/config.js';
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js';
+import { GLTFLoader } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/loaders/GLTFLoader.js';
+import { PointerLockControls } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/controls/PointerLockControls.js';
+
+const staticAudio = document.getElementById("static-sound");
+staticAudio.volume = 0.25;
+
+let scene, camera, renderer, controls;
+let moveForward = false, moveBackward = false, moveLeft = false, moveRight = false;
+let isSprinting = false;
+
+// Physics variables
+let velocity = new THREE.Vector3();
+let direction = new THREE.Vector3();
+const playerHeight = 1.3;
+const gravity = 30; // m/s^2
+const walkSpeed = 4;
+const sprintSpeed = 8;
+
+// Collision
+let raycaster;
+let worldMeshes = []; // Store the GLB meshes here for collision
+
+// Content & Progress
+let interactiveObjects = [];
+let hubData = null;
+let roomsData = null;
+const PROGRESS_KEY = 'vhs_progress';
+let progress = { completedRoomIds: [], nextDoorIndex: 0, totalRooms: 0 };
+
+let clock = new THREE.Clock();
+const loadingDiv = document.getElementById('loading');
+const loadingText = document.getElementById('loading-text');
+const progressFill = document.getElementById('progress-fill');
+const btnBack = document.getElementById('btn-back');
+const statusText = document.getElementById('status');
+const interactionPrompt = document.getElementById('interaction-prompt');
+const LANG_KEY = 'vhs_lang';
+let currentLang = localStorage.getItem(LANG_KEY) || 'en';
+
+const STRINGS = {
+  en: {
+    back: "← BACK",
+    init: "Initializing…",
+    loading: "Loading model…",
+    loaded: "Model loaded!",
+    failed: "Model failed — using fallback.",
+    status: "Click to look around • WASD to move • SHIFT to sprint • F to interact",
+    audioBlocked: "Audio blocked - click to enable",
+    open: "OPEN (F)",
+    locked: "LOCKED"
+  },
+  zh: {
+    back: "← 返回",
+    init: "初始化中…",
+    loading: "加载模型中…",
+    loaded: "模型加载完成！",
+    failed: "模型加载失败 — 使用备用地面。",
+    status: "点击画面浏览 • WASD 移动 • SHIFT 加速 • F 互动",
+    audioBlocked: "音频被拦截 - 点击以启用",
+    open: "打开 (F)",
+    locked: "已锁"
+  }
+};
+
+const TEXT = STRINGS[currentLang];
+
+// Apply initial UI text
+btnBack.textContent = TEXT.back;
+loadingText.textContent = TEXT.init;
+statusText.textContent = TEXT.status;
+
+// Back Button Logic
+btnBack.addEventListener('click', () => {
+  saveState();
+  // Ensure we unlock controls so the cursor is visible for the next page if needed
+  if (controls) controls.unlock();
+  window.location.href = '../';
+});
+
+function updateLoading(text, percent=0){
+  loadingText.textContent=text;
+  progressFill.style.width=percent+'%';
+}
+
+// Check for saved state
+const SAVE_KEY = 'vhs_save_data';
+
+function init3D(){
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x000000);
+  // Fog for atmosphere and to hide edge of world
+  scene.fog = new THREE.Fog(0x000000, 0, 30);
+
+  camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, .1, 1000);
+  camera.position.set(0, playerHeight, 5);
+  camera.rotation.set(0, 0, 0); // Ensure straight view initially
+
+  // Load saved state if available
+  const savedState = localStorage.getItem(SAVE_KEY);
+  if (savedState) {
+    try {
+      const data = JSON.parse(savedState);
+      if (data.pos) camera.position.set(data.pos.x, data.pos.y, data.pos.z);
+      // if (data.rot) {
+      //   camera.rotation.x = data.rot._x; 
+      //   camera.rotation.y = data.rot._y;
+      // }
+      console.log("Loaded save state (position only):", data);
+    } catch (e) {
+      console.error("Failed to load save state", e);
+    }
+  }
+
+  renderer = new THREE.WebGLRenderer({antialias:true});
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio,2));
+  document.getElementById('room3D').appendChild(renderer.domElement);
+  
+  const ambient = new THREE.AmbientLight(0xffffff,.6);
+  const dir = new THREE.DirectionalLight(0xffffff,.9);
+  dir.position.set(10,20,12);
+  scene.add(ambient,dir);
+  
+  controls = new PointerLockControls(camera, renderer.domElement);
+  
+  // Only lock if clicking on the canvas, not the back button
+  renderer.domElement.addEventListener('click',()=>controls.lock());
+  
+  raycaster = new THREE.Raycaster(new THREE.Vector3(), new THREE.Vector3(0, -1, 0), 0, 10);
+
+  const onKeyDown = function (event) {
+    switch (event.code) {
+      case 'ArrowUp':
+      case 'KeyW': moveForward = true; break;
+      case 'ArrowLeft':
+      case 'KeyA': moveLeft = true; break;
+      case 'ArrowDown':
+      case 'KeyS': moveBackward = true; break;
+      case 'ArrowRight':
+      case 'KeyD': moveRight = true; break;
+      case 'ShiftLeft':
+      case 'ShiftRight': isSprinting = true; break;
+      case 'KeyF': attemptInteract(); break;
+    }
+  };
+  const onKeyUp = function (event) {
+    switch (event.code) {
+      case 'ArrowUp':
+      case 'KeyW': moveForward = false; break;
+      case 'ArrowLeft':
+      case 'KeyA': moveLeft = false; break;
+      case 'ArrowDown':
+      case 'KeyS': moveBackward = false; break;
+      case 'ArrowRight':
+      case 'KeyD': moveRight = false; break;
+      case 'ShiftLeft':
+      case 'ShiftRight': isSprinting = false; break;
+    }
+  };
+  document.addEventListener('keydown', onKeyDown);
+  document.addEventListener('keyup', onKeyUp);
+  
+  updateLoading(TEXT.loading, 40);
+  loadData();
+  window.addEventListener('resize',onResize);
+  
+  // Start auto-save loop
+  setInterval(saveState, 2000);
+  
+  animate();
+  
+  // Attempt to play audio
+  staticAudio.play().catch(()=>console.warn(TEXT.audioBlocked));
+}
+
+function saveState() {
+  if (!camera) return;
+  const data = {
+    pos: camera.position,
+    rot: camera.rotation
+  };
+  localStorage.setItem(SAVE_KEY, JSON.stringify(data));
+}
+
+async function loadData(){
+  try{
+    const [hubRes, roomsRes] = await Promise.all([fetch('/api/hub'), fetch('/api/rooms')]);
+    hubData = await hubRes.json();
+    roomsData = await roomsRes.json();
+    progress.totalRooms = roomsData.rooms.length;
+    const stored = localStorage.getItem(PROGRESS_KEY);
+    if (stored) {
+      try { progress = JSON.parse(stored); } catch {}
+      if (!progress.totalRooms) progress.totalRooms = roomsData.rooms.length;
+    }
+    loadHubScene();
+  } catch(e){
+    console.error('Failed to load data', e);
+    updateLoading('Failed to load data', 80);
+  }
+}
+
+function persistProgress(){
+  localStorage.setItem(PROGRESS_KEY, JSON.stringify(progress));
+}
+
+function clearSceneContent(){
+  interactiveObjects.length = 0;
+  worldMeshes.length = 0;
+  // Remove non-light objects
+  for (let i = scene.children.length - 1; i >= 0; i--) {
+    const obj = scene.children[i];
+    if (!(obj.isLight)) {
+      scene.remove(obj);
+    }
+  }
+}
+
+function loadHubScene(){
+  clearSceneContent();
+  const loader = new GLTFLoader();
+  
+  // Load Hub and Door models in parallel
+  Promise.all([
+    loader.loadAsync(CONFIG.resolveAsset(hubData.modelUrl || '/assets/models/backrooms_again.glb')),
+    loader.loadAsync(CONFIG.resolveAsset('models/door.glb')).catch(e => { console.error('Failed to load door:', e); return null; }) // Continue even if door fails
+  ]).then(([hubGltf, doorGltf]) => {
+      updateLoading(TEXT.loaded, 100);
+      
+      const hubModel = hubGltf.scene;
+      scene.add(hubModel);
+      hubModel.traverse((child) => { if (child.isMesh) worldMeshes.push(child); });
+      
+      setupDoors(doorGltf ? doorGltf.scene : null);
+      
+      setTimeout(()=>loadingDiv.style.display='none',900);
+  }).catch((err)=>{
+      console.error('GLTF Load Error:', err);
+      updateLoading(TEXT.failed, 90);
+      // Fallback floor
+      const floor = new THREE.Mesh(
+        new THREE.PlaneGeometry(50,50),
+        new THREE.MeshStandardMaterial({color:0xffffcc,roughness:.9})
+      );
+      floor.rotation.x=-Math.PI/2; floor.position.y=-.5;
+      scene.add(floor); worldMeshes.push(floor);
+      setupDoors(null);
+  });
+}
+
+function setupDoors(doorTemplate=null){
+  const nCompleted = progress.completedRoomIds.length || 0;
+  const allDone = nCompleted >= progress.totalRooms;
+  
+  hubData.doors.forEach((doorDef, idx)=>{
+    let doorGroup;
+    const locked = allDone ? false : (idx !== nCompleted);
+
+    if (doorTemplate) {
+        doorGroup = doorTemplate.clone();
+        // Clone materials to allow individual tinting
+        doorGroup.traverse((child)=>{
+            if(child.isMesh){
+                child.material = child.material.clone();
+                if(locked) {
+                    // Darken locked doors
+                    child.material.color.setHex(0x444444); 
+                } else {
+                    // Reset to white/original for unlocked
+                     child.material.color.setHex(0xffffff);
+                }
+            }
+        });
+    } else {
+      // Fallback primitives
+      doorGroup = new THREE.Mesh(
+        new THREE.BoxGeometry(1,2,0.1),
+        new THREE.MeshStandardMaterial({color: locked ? 0x555555 : 0x88ff88})
+      );
+      doorGroup.position.y += 1; // Center pivot adjustment
+    }
+
+    // Scale
+        if (doorDef.scale) {
+             doorGroup.scale.set(doorDef.scale.x, doorDef.scale.y, doorDef.scale.z);
+        } else {
+             doorGroup.scale.set(0.2, 0.2, 0.2);
+        }
+
+    // Initial Position
+    doorGroup.position.set(doorDef.position.x, doorDef.position.y, doorDef.position.z);
+    doorGroup.rotation.set(doorDef.rotation.x, doorDef.rotation.y, doorDef.rotation.z);
+    
+    // Auto-adjust to sit on floor
+    // We need to update matrix to get correct bounding box
+    doorGroup.updateMatrixWorld(true); 
+    const box = new THREE.Box3().setFromObject(doorGroup);
+    const bottomY = box.min.y;
+    // Shift so the bottom of the door aligns with the defined Y position (usually 0)
+    doorGroup.position.y += (doorDef.position.y - bottomY);
+
+    // Setup interaction data
+      doorGroup.userData = { type:'door', roomId: doorDef.roomId, index: idx, locked: locked };
+      
+      // Propagate data to all children for raycasting
+      doorGroup.traverse((c) => { 
+          c.userData = doorGroup.userData; 
+          if(c.isMesh) worldMeshes.push(c); // Add to collision list
+      });
+      
+      scene.add(doorGroup);
+      interactiveObjects.push(doorGroup);
+    });
+  }
+
+function loadRoomScene(roomId){
+  clearSceneContent();
+  const room = roomsData.rooms.find(r=>r.id===roomId);
+  if (!room) { console.warn('Unknown room', roomId); return; }
+  const loader = new GLTFLoader();
+  loader.load(CONFIG.resolveAsset(room.modelUrl),
+    (gltf)=>{
+      updateLoading(`Room loaded: ${room.name}`,100);
+      const model = gltf.scene;
+      scene.add(model);
+      model.traverse((child) => { if (child.isMesh) worldMeshes.push(child); });
+      setupItems(room);
+      setTimeout(()=>loadingDiv.style.display='none',700);
+    },
+    (xhr)=>{
+      const p = xhr.total ? (xhr.loaded/xhr.total)*100 : 0;
+      updateLoading(`Loading room… ${Math.round(p)}%`,50+p*.4);
+    },
+    (err)=>{
+      console.error(err);
+      updateLoading("Room load failed — fallback floor.",90);
+      const floor = new THREE.Mesh(
+        new THREE.PlaneGeometry(30,30),
+        new THREE.MeshStandardMaterial({color:0xccccff,roughness:.9})
+      );
+      floor.rotation.x=-Math.PI/2; floor.position.y=-.5;
+      scene.add(floor); worldMeshes.push(floor);
+      setupItems(room);
+    }
+  );
+}
+
+function setupItems(room){
+  (room.items||[]).forEach(item=>{
+    const itemMesh = new THREE.Mesh(
+      new THREE.SphereGeometry(0.15, 16, 16),
+      new THREE.MeshStandardMaterial({color: item.objective ? 0xffaa00 : 0x00aaff})
+    );
+    itemMesh.position.set(item.position.x, item.position.y, item.position.z);
+    itemMesh.rotation.set(item.rotation.x, item.rotation.y, item.rotation.z);
+    itemMesh.userData = { type:'item', itemId:item.id, roomId:room.id, objective: !!item.objective };
+    scene.add(itemMesh);
+    interactiveObjects.push(itemMesh);
+  });
+}
+
+function attemptInteract(){
+  // Cast a ray forward from camera to find nearest interactive object
+  const dir = new THREE.Vector3();
+  camera.getWorldDirection(dir);
+  raycaster.ray.origin.copy(camera.position);
+  raycaster.ray.direction.copy(dir);
+  raycaster.far = 3.0;
+  const hits = raycaster.intersectObjects(interactiveObjects, true);
+  if (!hits.length) return;
+  const hit = hits[0].object;
+  const ud = hit.userData || {};
+  if (ud.type === 'door'){
+    if (ud.locked) {
+      updateLoading(TEXT.locked, 0);
+      setTimeout(()=>updateLoading('',0),500);
+      return;
+    }
+    // Navigate to room subdirectory
+    // ud.roomId e.g. "room-1"
+    saveState();
+    if (controls) controls.unlock();
+    window.location.href = `./${ud.roomId}/`;
+    return;
+  }
+  if (ud.type === 'item'){
+    if (ud.objective){
+      // Mark room completed
+      if (!progress.completedRoomIds.includes(ud.roomId)){
+        progress.completedRoomIds.push(ud.roomId);
+      }
+      if (progress.completedRoomIds.length >= progress.totalRooms){
+        // Unlock all
+        progress.nextDoorIndex = progress.totalRooms;
+      } else {
+        progress.nextDoorIndex = progress.completedRoomIds.length;
+      }
+      persistProgress();
+      returnToHub();
+    }
+  }
+}
+
+function returnToHub(){
+  loadHubScene();
+}
+
+function onResize(){
+  camera.aspect=window.innerWidth/window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth,window.innerHeight);
+}
+
+function animate(){
+  requestAnimationFrame(animate);
+  
+  if (controls.isLocked === true) {
+      // Check for interaction target every frame to show prompt
+      const rayDir = new THREE.Vector3();
+      camera.getWorldDirection(rayDir);
+      raycaster.ray.origin.copy(camera.position);
+      raycaster.ray.direction.copy(rayDir);
+      raycaster.far = 3.0; // Interaction distance
+      const hits = raycaster.intersectObjects(interactiveObjects, true);
+      
+      if (hits.length > 0) {
+        const obj = hits[0].object;
+        const ud = obj.userData || {};
+        // Traverse up if needed
+        let target = obj;
+        while(!target.userData.type && target.parent) target = target.parent;
+        const data = target.userData;
+
+        if (data.type === 'door') {
+           interactionPrompt.style.display = 'block';
+           interactionPrompt.textContent = data.locked ? TEXT.locked : TEXT.open;
+           interactionPrompt.style.color = data.locked ? '#ff5555' : '#ffffff';
+        } else if (data.type === 'item' && data.objective) {
+           interactionPrompt.style.display = 'block';
+           interactionPrompt.textContent = "COLLECT (F)"; // Can localize later
+           interactionPrompt.style.color = '#ffff00';
+        } else {
+           interactionPrompt.style.display = 'none';
+        }
+      } else {
+        interactionPrompt.style.display = 'none';
+      }
+
+      const delta = clock.getDelta();
+
+      // Damping (Friction)
+      velocity.x -= velocity.x * 10.0 * delta;
+      velocity.z -= velocity.z * 10.0 * delta;
+      velocity.y -= gravity * delta; // Gravity
+
+      direction.z = Number(moveForward) - Number(moveBackward);
+      direction.x = Number(moveRight) - Number(moveLeft);
+      direction.normalize();
+
+      const currentSpeed = isSprinting ? sprintSpeed : walkSpeed;
+
+      if (moveForward || moveBackward) velocity.z -= direction.z * currentSpeed * delta * 10;
+      if (moveLeft || moveRight) velocity.x -= direction.x * currentSpeed * delta * 10;
+
+      // --- Collision Detection & Movement ---
+      const originalPos = camera.position.clone();
+
+      // Helper for wall collision
+      const checkWall = (start, end) => {
+          const dir = new THREE.Vector3().subVectors(end, start);
+          const dist = dir.length();
+          if (dist < 0.001) return false;
+          
+          dir.normalize();
+          raycaster.ray.origin.copy(start);
+          raycaster.ray.origin.y -= 0.5; // Check at torso level
+          raycaster.ray.direction.copy(dir);
+          raycaster.far = dist + 0.3; // Check movement + buffer
+          
+          const hits = raycaster.intersectObjects(worldMeshes, true);
+          return hits.length > 0;
+      };
+
+      // 1. Horizontal Movement (Split Axis for sliding)
+      
+      // Apply X-axis movement (Strafe)
+      controls.moveRight(-velocity.x * delta);
+      if (checkWall(originalPos, camera.position)) {
+          // Hit wall, revert X
+          camera.position.x = originalPos.x;
+          camera.position.z = originalPos.z;
+          velocity.x = 0;
+      }
+      
+      const posAfterX = camera.position.clone();
+      
+      // Apply Z-axis movement (Forward/Back)
+      controls.moveForward(-velocity.z * delta);
+      if (checkWall(posAfterX, camera.position)) {
+          // Hit wall, revert Z
+          camera.position.x = posAfterX.x;
+          camera.position.z = posAfterX.z;
+          velocity.z = 0;
+      }
+
+      // 2. Vertical Movement & Ceiling Check
+      camera.position.y += velocity.y * delta;
+      
+      if (velocity.y > 0) {
+          // Check Ceiling
+          raycaster.ray.origin.copy(camera.position);
+          raycaster.ray.direction.set(0, 1, 0);
+          raycaster.far = 1.0; // Clearance above head
+          
+          const ceilingHits = raycaster.intersectObjects(worldMeshes, true);
+          if (ceilingHits.length > 0) {
+             // Hit ceiling, stop upward momentum and push out
+             velocity.y = 0;
+             camera.position.y -= (1.0 - ceilingHits[0].distance);
+          }
+      }
+
+      // 3. Floor/Void Check
+      const rayOriginY = camera.position.y - (playerHeight - 0.5);
+      raycaster.ray.origin.copy(camera.position);
+      raycaster.ray.origin.y = rayOriginY;
+      raycaster.ray.direction.set(0, -1, 0);
+      raycaster.far = 10;
+      
+      const intersections = raycaster.intersectObjects(worldMeshes, true);
+      const onObject = intersections.length > 0;
+      
+      if (onObject) {
+          const distanceToFloor = intersections[0].distance;
+          // Target Eye Level = (RayOrigin - Distance) + Height
+          const targetY = (rayOriginY - distanceToFloor) + playerHeight;
+          
+          if (velocity.y <= 0) {
+              // Snap to floor if falling or walking
+              camera.position.y = targetY;
+              velocity.y = Math.max(0, velocity.y);
+          }
+      } else {
+          // Void / No Floor - Revert entire move to prevent walking off edge
+          // Unless we are jumping high over a gap? 
+          // User said "ensure users stay on the floor".
+          camera.position.copy(originalPos);
+          velocity.x = 0;
+          velocity.z = 0;
+      }
+      
+      if (camera.position.y < -10) {
+          velocity.y = 0;
+          camera.position.set(0, playerHeight, 5);
+      }
+  } else {
+      velocity.x = 0;
+      velocity.z = 0;
+  }
+
+  renderer.render(scene,camera);
+}
+
+// Start immediately
+init3D();
+
+</script>
+</body>
+</html>

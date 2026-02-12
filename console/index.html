@@ -1,0 +1,972 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Yijun Records Admin Console</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
+  <script>
+    // Admin authentication is enforced by Cloudflare Access at the /console route.
+    // No client-side password gate is used.
+  </script>
+  <style>
+    body { font-family: 'Inter', sans-serif; background: #111; color: #eee; margin: 0; overflow: hidden; height: 100vh; display: flex; flex-direction: column; }
+    
+    /* Header */
+    #header { height: 50px; background: #1a1a1a; border-bottom: 1px solid #333; display: flex; align-items: center; padding: 0 20px; justify-content: space-between; }
+    h1 { margin: 0; font-size: 1.2em; }
+    
+    /* Layout */
+    #main { display: flex; flex: 1; overflow: hidden; }
+    
+    /* Sidebar */
+    #sidebar { width: 300px; background: #222; border-right: 1px solid #333; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 20px; }
+    
+    /* 3D Viewport */
+    #viewport { flex: 1; position: relative; background: #000; }
+    #viewport canvas { display: block; width: 100%; height: 100%; }
+    
+    /* UI Elements */
+    .card { background: #2a2a2a; padding: 15px; border-radius: 6px; border: 1px solid #333; }
+    .row { display: flex; gap: 10px; margin-bottom: 10px; align-items: center; }
+    label { min-width: 80px; color: #aaa; font-size: 0.9em; }
+    input, select { background: #333; border: 1px solid #444; color: white; padding: 6px; border-radius: 4px; flex: 1; font-size: 0.9em; }
+    
+    button { background: #0066cc; color: white; border: none; padding: 8px 12px; border-radius: 4px; cursor: pointer; font-size: 0.9em; }
+    button:hover { background: #0077ee; }
+    button.delete { background: #cc3333; }
+    button.delete:hover { background: #ee4444; }
+    button.secondary { background: #444; }
+    button.logout { background: #333; font-size: 0.8em; padding: 5px 10px; border: 1px solid #444; }
+
+    .room-item { padding: 8px; cursor: pointer; border-bottom: 1px solid #333; display: flex; justify-content: space-between; }
+    .room-item:hover { background: #333; }
+    .room-item.active { background: #004488; }
+    
+    /* Overlays */
+    #loading-overlay { position: absolute; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.7); display:flex; justify-content:center; align-items:center; z-index: 100; pointer-events: none; opacity: 0; transition: opacity 0.3s; }
+    #loading-overlay.visible { opacity: 1; pointer-events: auto; }
+    
+    #controls-help { position: absolute; bottom: 20px; right: 20px; background: rgba(0,0,0,0.5); padding: 10px; border-radius: 4px; pointer-events: none; font-size: 0.8em; color: #ccc; }
+  </style>
+</head>
+<body>
+
+<div id="header">
+  <h1>Yijun Records Admin Console</h1>
+  <div>
+    <button onclick="saveToDatabase()" style="margin-right: 10px; background:#664444">Save to DB</button>
+    <!-- Cloudflare Access manages login; no local logout -->
+  </div>
+</div>
+
+<div id="main">
+  <!-- Sidebar -->
+  <div id="sidebar">
+    <!-- Room List -->
+    <div id="room-list-panel">
+      <h3>Structure</h3>
+      <div id="structure-list" style="border: 1px solid #333; max-height: 250px; overflow-y: auto; background: #1a1a1a; margin-bottom: 10px;">
+          <!-- Populated by JS -->
+      </div>
+      <button onclick="addNewRoom()">+ New Room</button>
+    </div>
+
+    <!-- Properties Panel -->
+    <div id="properties-panel" style="display:none;">
+      <h3 id="props-title">Properties</h3>
+      <div class="row">
+        <label>Name/ID:</label>
+        <input type="text" id="prop-name" onchange="updateProp('name', this.value)">
+      </div>
+      <div class="row">
+        <label>Model:</label>
+        <input type="text" id="prop-model" onchange="updateProp('modelUrl', this.value)">
+      </div>
+      
+      <hr style="border-color:#333; margin: 15px 0;">
+      
+      <h3>Content</h3>
+      <div id="items-list" style="max-height: 200px; overflow-y: auto; margin-bottom: 10px;"></div>
+      <button id="btn-add-item" onclick="addNewItem()">+ Add Item</button>
+      
+      <div style="margin-top: 20px;">
+        <button id="btn-delete-room" onclick="deleteRoom()" class="delete" style="width:100%">Delete Room</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 3D Viewport -->
+  <div id="viewport">
+    <div id="loading-overlay">Loading...</div>
+    <div id="controls-help">
+      Left Click: Select Item | Middle Mouse: Pan<br>
+      W: Translate | E: Rotate | R: Scale<br>
+      +: Increase Scale | -: Decrease Scale<br>
+      Del: Delete Selected
+    </div>
+  </div>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { TransformControls } from 'three/addons/controls/TransformControls.js';
+import { CONFIG } from '/src/js/config.js';
+import { StorageService } from '../src/services/StorageService.ts';
+import { DatabaseService } from '../src/services/DatabaseService.ts';
+import { AppConfig } from '../src/config.ts';
+
+const storageService = new StorageService(AppConfig.storage);
+const dbService = new DatabaseService();
+
+let scene, camera, renderer, orbit, transformControl;
+let roomsData = { rooms: [] };
+let hubData = { modelUrl: '', doors: [] };
+let currentMode = null; // 'hub' or 'room'
+let currentData = null; // References either hubData or a specific room object
+let loadedMeshes = []; // { mesh, dataRef, isDoor, isItem }
+let isPlacingNewRoomDoor = false;
+
+// DOM Elements
+const structureListEl = document.getElementById('structure-list');
+const propsPanel = document.getElementById('properties-panel');
+const itemsListEl = document.getElementById('items-list');
+const loadingOverlay = document.getElementById('loading-overlay');
+const btnAddItem = document.getElementById('btn-add-item');
+const btnDeleteRoom = document.getElementById('btn-delete-room');
+
+// --- Initialization ---
+
+function init() {
+  // Scene Setup
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x222222);
+  
+  // Grid
+  const gridHelper = new THREE.GridHelper(20, 20);
+  scene.add(gridHelper);
+  
+  // Lights
+  const ambient = new THREE.AmbientLight(0xffffff, 0.6);
+  scene.add(ambient);
+  const dirLight = new THREE.DirectionalLight(0xffffff, 1);
+  dirLight.position.set(5, 10, 7);
+  scene.add(dirLight);
+
+  // Camera
+  const aspect = document.getElementById('viewport').clientWidth / document.getElementById('viewport').clientHeight;
+  camera = new THREE.PerspectiveCamera(50, aspect, 0.1, 100);
+  camera.position.set(5, 5, 5);
+  camera.lookAt(0, 0, 0);
+
+  // Renderer
+  renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setPixelRatio(window.devicePixelRatio);
+  renderer.setSize(document.getElementById('viewport').clientWidth, document.getElementById('viewport').clientHeight);
+  document.getElementById('viewport').appendChild(renderer.domElement);
+
+  // Controls
+  orbit = new OrbitControls(camera, renderer.domElement);
+  orbit.mouseButtons = {
+      LEFT: THREE.MOUSE.ROTATE,
+      MIDDLE: THREE.MOUSE.PAN,
+      RIGHT: THREE.MOUSE.DOLLY
+  };
+  orbit.update();
+
+  transformControl = new TransformControls(camera, renderer.domElement);
+  transformControl.addEventListener('dragging-changed', function (event) {
+    orbit.enabled = !event.value;
+  });
+  transformControl.addEventListener('change', function () {
+    if (transformControl.object) {
+      if (transformControl.object.userData.isItem) {
+        updateItemFromMesh(transformControl.object);
+      } else if (transformControl.object.userData.isDoor) {
+        updateDoorFromMesh(transformControl.object);
+      }
+    }
+  });
+  scene.add(transformControl);
+
+  // Events
+  window.addEventListener('resize', onWindowResize);
+  window.addEventListener('keydown', onKeyDown);
+  renderer.domElement.addEventListener('click', onCanvasClick);
+
+  // Load Data
+  loadAllData();
+  
+  animate();
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+  renderer.render(scene, camera);
+}
+
+function onWindowResize() {
+  const vp = document.getElementById('viewport');
+  camera.aspect = vp.clientWidth / vp.clientHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(vp.clientWidth, vp.clientHeight);
+}
+
+// --- Data Logic ---
+
+async function loadAllData() {
+  try {
+    let loadedFromDB = false;
+    
+    // 1. Try Database (Worker API)
+    try {
+       console.log("Loading data from Database...");
+       const dbRooms = await dbService.getRoomsData();
+       const dbHub = await dbService.getHubData();
+       
+       if (dbRooms && dbHub && dbRooms.rooms) {
+          console.log("Loaded data from Database");
+          roomsData = dbRooms;
+          hubData = dbHub;
+          loadedFromDB = true;
+       }
+    } catch (e) {
+       console.warn("DB connection failed or returned invalid data", e);
+    }
+
+    // 2. Fallback removed - DB Only
+    if (!loadedFromDB) {
+        console.warn("Could not load data from Database. Using empty state.");
+    }
+  
+    // Ensure sync on load
+    syncHubDoors();
+    
+    renderStructureList();
+  } catch (e) {
+    console.error("Critical error in loadAllData", e);
+  }
+}
+
+function syncHubDoors() {
+    if (!hubData.doors) hubData.doors = [];
+    
+    const activeRoomIds = new Set(roomsData.rooms.map(r => r.id));
+    
+    // 1. Remove doors whose rooms no longer exist
+    hubData.doors = hubData.doors.filter(d => activeRoomIds.has(d.roomId));
+}
+
+function renderStructureList() {
+  structureListEl.innerHTML = '';
+  
+  // 1. Hub Entry
+  const hubDiv = document.createElement('div');
+  hubDiv.className = `room-item ${currentMode === 'hub' ? 'active' : ''}`;
+  hubDiv.innerText = "Hub (Base Room)";
+  hubDiv.onclick = () => selectHub();
+  structureListEl.appendChild(hubDiv);
+  
+  // 2. Separator
+  const sep = document.createElement('hr');
+  sep.style.borderColor = '#333';
+  structureListEl.appendChild(sep);
+
+  // 3. Room List
+  roomsData.rooms.sort((a,b) => a.order - b.order).forEach(room => {
+    const div = document.createElement('div');
+    div.className = `room-item ${currentMode === 'room' && currentData.id === room.id ? 'active' : ''}`;
+    div.innerText = `${room.order}. ${room.name}`;
+    div.onclick = () => selectRoom(room.id);
+    structureListEl.appendChild(div);
+  });
+}
+
+async function selectHub() {
+  if (currentMode === 'hub') return;
+  currentMode = 'hub';
+  currentData = hubData;
+  renderStructureList();
+  
+  // UI Updates
+  propsPanel.style.display = 'block';
+  document.getElementById('props-title').innerText = "Hub Properties";
+  document.getElementById('prop-name').value = "Hub";
+  document.getElementById('prop-name').disabled = true; // Can't rename hub
+  document.getElementById('prop-model').value = hubData.modelUrl || '';
+  
+  btnAddItem.style.display = 'none'; // Can't add random items to hub (only doors via sync)
+  btnDeleteRoom.style.display = 'none'; // Can't delete hub
+  
+  renderItemsList();
+  await loadScene();
+}
+
+async function selectRoom(id) {
+  const room = roomsData.rooms.find(r => r.id === id);
+  if (!room) return;
+  
+  if (currentMode === 'room' && currentData.id === id) return;
+  
+  currentMode = 'room';
+  currentData = room;
+  renderStructureList();
+  
+  // UI Updates
+  propsPanel.style.display = 'block';
+  document.getElementById('props-title').innerText = "Room Properties";
+  document.getElementById('prop-name').disabled = false;
+  document.getElementById('prop-name').value = room.name;
+  document.getElementById('prop-model').value = room.modelUrl;
+  
+  btnAddItem.style.display = 'block';
+  btnDeleteRoom.style.display = 'block';
+  
+  renderItemsList();
+  await loadScene();
+}
+
+async function loadScene() {
+  showLoading(true);
+  
+  // Clear Scene
+  const toRemove = [];
+  scene.traverse(child => {
+    if (child.userData.isRoomContent) toRemove.push(child);
+  });
+  toRemove.forEach(obj => scene.remove(obj));
+  transformControl.detach();
+  loadedMeshes = [];
+
+  const loader = new GLTFLoader();
+  
+  // 1. Load Environment
+  const modelUrl = (currentMode === 'hub' && !currentData.modelUrl) 
+    ? '/assets/models/backrooms_again.glb' 
+    : currentData.modelUrl;
+
+  if (modelUrl) {
+    try {
+      const fullUrl = CONFIG.resolveAsset(modelUrl);
+      console.log(`Loading model from: ${fullUrl}`); // Debug Log
+      
+      const gltf = await loader.loadAsync(fullUrl);
+      const model = gltf.scene;
+      model.userData.isRoomContent = true;
+      model.userData.isEnvironment = true;
+      scene.add(model);
+    } catch (e) {
+      console.error("Failed to load model", e);
+      alert(`Failed to load model from ${CONFIG.resolveAsset(modelUrl)}\nCheck console for details.`);
+    }
+  }
+
+  // 2. Load Content
+  if (currentMode === 'hub') {
+    // Load Doors
+    if (hubData.doors) {
+      for (let door of hubData.doors) {
+        await loadDoorMesh(door, loader);
+      }
+    }
+  } else {
+    // Load Items
+    if (currentData.items) {
+      for (let item of currentData.items) {
+        await loadItemMesh(item, loader);
+      }
+    }
+  }
+
+  showLoading(false);
+}
+
+async function loadDoorMesh(door, loader) {
+    // We assume a standard door model for visualization
+    const doorModelUrl = CONFIG.resolveAsset('models/door.glb'); 
+    let mesh;
+    try {
+        const gltf = await loader.loadAsync(doorModelUrl);
+        mesh = gltf.scene;
+    } catch (e) {
+        console.warn("Failed to load door model", e);
+        const geo = new THREE.BoxGeometry(1, 2, 0.2);
+        const mat = new THREE.MeshStandardMaterial({ color: 0x4488ff });
+        mesh = new THREE.Mesh(geo, mat);
+    }
+    
+    // Scale (Default to 0.2 if not set, matching game logic)
+    if (door.scale) {
+        mesh.scale.set(door.scale.x, door.scale.y, door.scale.z);
+    } else {
+        mesh.scale.set(0.2, 0.2, 0.2);
+    }
+
+    // Initial Position & Rotation
+    mesh.position.set(door.position.x, door.position.y, door.position.z);
+    mesh.rotation.set(door.rotation.x, door.rotation.y, door.rotation.z);
+    
+    // Auto-adjust to sit on floor (Snap Logic)
+    mesh.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(mesh);
+    const bottomY = box.min.y;
+    // Shift so the bottom of the door aligns with the defined Y position
+    mesh.position.y += (door.position.y - bottomY);
+
+    mesh.userData.isRoomContent = true;
+    mesh.userData.isDoor = true;
+    mesh.userData.doorData = door;
+    
+    scene.add(mesh);
+    loadedMeshes.push({ mesh, dataRef: door, isDoor: true });
+    return mesh;
+}
+
+async function loadItemMesh(item, loader) {
+  let mesh;
+  let url = item.mediaUrl;
+
+  // Defaults based on type if no specific URL provided
+  if (!url) {
+      if (item.type === 'cassette' || item.type === 'collectible') url = CONFIG.resolveAsset('models/cassette_tape.glb');
+  }
+
+  if (url) {
+    try {
+      const gltf = await loader.loadAsync(CONFIG.resolveAsset(url));
+      mesh = gltf.scene;
+    } catch (e) {
+      console.warn("Failed to load item model", url);
+      mesh = createPlaceholderMesh();
+    }
+  } else {
+    mesh = createPlaceholderMesh();
+  }
+
+  mesh.position.set(item.position.x, item.position.y, item.position.z);
+  if (item.scale) {
+    const s = (typeof item.scale === 'number') ? { x: item.scale, y: item.scale, z: item.scale } : item.scale;
+    mesh.scale.set(s.x ?? 1, s.y ?? 1, s.z ?? 1);
+  } else if (item.type === 'cassette' || item.type === 'collectible') {
+    mesh.scale.set(5,5,5);
+  }
+  
+  if (item.rotation) mesh.rotation.set(item.rotation.x, item.rotation.y, item.rotation.z);
+
+  mesh.userData.isRoomContent = true;
+  mesh.userData.isItem = true;
+  mesh.userData.item = item;
+  
+  scene.add(mesh);
+  loadedMeshes.push({ mesh, dataRef: item, isItem: true });
+  return mesh;
+}
+
+function createPlaceholderMesh() {
+  const geo = new THREE.BoxGeometry(0.5, 0.5, 0.5);
+  const mat = new THREE.MeshStandardMaterial({ color: 0xff0000 });
+  return new THREE.Mesh(geo, mat);
+}
+
+function renderItemsList() {
+  itemsListEl.innerHTML = '';
+  
+  if (currentMode === 'hub') {
+      // List Doors
+      if (hubData.doors) {
+          hubData.doors.forEach((door, idx) => {
+             const div = document.createElement('div');
+             div.className = 'card';
+             div.style.marginBottom = '5px';
+             div.style.borderLeft = '3px solid #4488ff';
+             div.innerHTML = `
+               <div class="row"><strong>Door to: ${door.roomId}</strong></div>
+               <div class="row"><small>ID: ${door.id}</small></div>
+               <div class="row">
+                 <button onclick="window.focusContent(${idx}, 'door')" class="secondary">Focus</button>
+               </div>
+             `;
+             itemsListEl.appendChild(div);
+          });
+      }
+      return;
+  }
+
+  // List Items
+  if (!currentData.items) return;
+  currentData.items.forEach((item, idx) => {
+    const div = document.createElement('div');
+    div.className = 'card';
+    div.style.marginBottom = '5px';
+    const title = item.title || item.label || 'Item';
+    const type = item.type || 'collectible';
+    const objectiveText = item.objectiveText || item.objective_text || '';
+    const isObjective = !!(item.objective || item.isObjective);
+    const titleRow = (type === 'pdf' || type === 'video') ? '' : `
+      <div class="row">
+        <label>Title:</label>
+        <input type="text" value="${title}" onchange="window.updateItemField(${idx}, 'title', this.value)">
+      </div>
+    `;
+    div.innerHTML = `
+      <div class="row"><strong>${title}</strong></div>
+      ${titleRow}
+      <div class="row">
+        <label>Type:</label>
+        <select onchange="window.updateItemField(${idx}, 'type', this.value)">
+          <option value="collectible" ${type==='collectible'?'selected':''}>collectible</option>
+          <option value="pdf" ${type==='pdf'?'selected':''}>pdf</option>
+          <option value="video" ${type==='video'?'selected':''}>video</option>
+          <option value="image" ${type==='image'?'selected':''}>image</option>
+          <option value="link" ${type==='link'?'selected':''}>link</option>
+        </select>
+      </div>
+      <div class="row">
+        <label>Objective:</label>
+        <input type="checkbox" ${isObjective?'checked':''} onchange="window.updateItemField(${idx}, 'isObjective', this.checked)">
+      </div>
+      <div class="row">
+        <label>Objective Text:</label>
+        <input type="text" value="${objectiveText}" onchange="window.updateItemField(${idx}, 'objectiveText', this.value)">
+      </div>
+      <div class="row">
+        <label>Media:</label>
+        <input type="file" accept=".pdf,video/*,image/*" onchange="window.uploadItemMedia(${idx}, this)">
+        ${item.mediaUrl ? `<button onclick="window.previewItemMedia(${idx})" class="secondary">Preview</button>` : ''}
+      </div>
+      <div class="row">
+         <button onclick="window.focusContent(${idx}, 'item')" class="secondary">Focus</button>
+         <button onclick="window.deleteItem(${idx})" class="delete">Del</button>
+      </div>
+    `;
+    itemsListEl.appendChild(div);
+  });
+}
+
+function handleDoorPlacementClick(event) {
+  const rect = renderer.domElement.getBoundingClientRect();
+  const mouse = new THREE.Vector2(
+    ((event.clientX - rect.left) / rect.width) * 2 - 1,
+    -((event.clientY - rect.top) / rect.height) * 2 + 1
+  );
+
+  const raycaster = new THREE.Raycaster();
+  raycaster.setFromCamera(mouse, camera);
+
+  const intersects = raycaster.intersectObjects(scene.children, true);
+  
+  let hit = null;
+  for (let hitObj of intersects) {
+    let obj = hitObj.object;
+    while(obj.parent && obj.parent !== scene) {
+       obj = obj.parent;
+    }
+    // Allow placement on environment or just anything that isn't an item/door
+    if (obj.userData.isEnvironment || (!obj.userData.isItem && !obj.userData.isDoor)) {
+       hit = hitObj;
+       break;
+    }
+  }
+
+  if (hit) {
+    completeAddRoom(hit.point);
+  }
+}
+
+function completeAddRoom(point) {
+  isPlacingNewRoomDoor = false;
+  
+  const overlay = document.getElementById('loading-overlay');
+  overlay.classList.remove('visible');
+  overlay.innerText = "Loading...";
+  overlay.style.pointerEvents = '';
+
+  const id = 'room-' + Date.now();
+  roomsData.rooms.push({
+    id: id,
+    name: 'New Room',
+    order: roomsData.rooms.length + 1,
+    modelUrl: '',
+    items: []
+  });
+  
+  hubData.doors.push({
+      id: `door-${id}`,
+      roomId: id,
+      position: { x: point.x, y: point.y, z: point.z },
+      rotation: { x: 0, y: 0, z: 0 },
+      scale: { x: 0.2, y: 0.2, z: 0.2 }
+  });
+  
+  renderStructureList();
+  
+  loadScene().then(() => {
+     const doorIdx = hubData.doors.findIndex(d => d.roomId === id);
+     if (doorIdx >= 0) {
+          window.focusContent(doorIdx, 'door');
+     }
+  });
+}
+
+// --- Interaction ---
+
+function onCanvasClick(event) {
+  if (isPlacingNewRoomDoor) {
+    handleDoorPlacementClick(event);
+    return;
+  }
+
+  const rect = renderer.domElement.getBoundingClientRect();
+  const mouse = new THREE.Vector2(
+    ((event.clientX - rect.left) / rect.width) * 2 - 1,
+    -((event.clientY - rect.top) / rect.height) * 2 + 1
+  );
+
+  const raycaster = new THREE.Raycaster();
+  raycaster.setFromCamera(mouse, camera);
+
+  const intersects = raycaster.intersectObjects(scene.children, true);
+  
+  let selected = null;
+  for (let hit of intersects) {
+    let obj = hit.object;
+    while(obj.parent && obj.parent !== scene) {
+      obj = obj.parent;
+    }
+    
+    if (obj.userData.isItem || obj.userData.isDoor) {
+      selected = obj;
+      break;
+    }
+  }
+
+  if (selected) {
+    transformControl.attach(selected);
+  } else {
+    transformControl.detach();
+  }
+}
+
+function updateItemFromMesh(mesh) {
+  const item = mesh.userData.item;
+  if (!item) return;
+  item.position = {
+    x: parseFloat(mesh.position.x.toFixed(2)),
+    y: parseFloat(mesh.position.y.toFixed(2)),
+    z: parseFloat(mesh.position.z.toFixed(2))
+  };
+  item.rotation = {
+      x: parseFloat(mesh.rotation.x.toFixed(2)),
+      y: parseFloat(mesh.rotation.y.toFixed(2)),
+      z: parseFloat(mesh.rotation.z.toFixed(2))
+  };
+  item.scale = {
+      x: parseFloat(mesh.scale.x.toFixed(2)),
+      y: parseFloat(mesh.scale.y.toFixed(2)),
+      z: parseFloat(mesh.scale.z.toFixed(2))
+  };
+  // Persist transform to backend
+  saveItemToBackend(item).catch(e => console.warn('Failed to save transform', e));
+}
+
+function updateDoorFromMesh(mesh) {
+    const door = mesh.userData.doorData;
+    if (!door) return;
+    door.position = {
+        x: parseFloat(mesh.position.x.toFixed(2)),
+        y: parseFloat(mesh.position.y.toFixed(2)),
+        z: parseFloat(mesh.position.z.toFixed(2))
+    };
+    door.rotation = {
+        x: parseFloat(mesh.rotation.x.toFixed(2)),
+        y: parseFloat(mesh.rotation.y.toFixed(2)),
+        z: parseFloat(mesh.rotation.z.toFixed(2))
+    };
+    door.scale = {
+        x: parseFloat(mesh.scale.x.toFixed(2)),
+        y: parseFloat(mesh.scale.y.toFixed(2)),
+        z: parseFloat(mesh.scale.z.toFixed(2))
+    };
+}
+
+function onKeyDown(event) {
+  if (event.key === 'Escape' && isPlacingNewRoomDoor) {
+      isPlacingNewRoomDoor = false;
+      const overlay = document.getElementById('loading-overlay');
+      overlay.classList.remove('visible');
+      overlay.innerText = "Loading...";
+      overlay.style.pointerEvents = '';
+      alert("Room creation cancelled.");
+      return;
+  }
+  switch (event.key) {
+    case 'w': transformControl.setMode('translate'); break;
+    case 'e': transformControl.setMode('rotate'); break;
+    case 'r': transformControl.setMode('scale'); break;
+    case '+': if(transformControl.object) transformControl.object.scale.multiplyScalar(1.1); updateContentFromMesh(transformControl.object); break;
+    case '-': if(transformControl.object) transformControl.object.scale.multiplyScalar(0.9); updateContentFromMesh(transformControl.object); break;
+    case 'Delete': 
+      if (transformControl.object) {
+        if (transformControl.object.userData.isDoor) {
+            alert("Cannot delete doors manually. They are managed by room structure.");
+            return;
+        }
+        const idx = currentData.items.indexOf(transformControl.object.userData.item);
+        if(idx > -1) window.deleteItem(idx);
+      }
+      break;
+  }
+}
+
+function updateContentFromMesh(mesh) {
+    if (mesh.userData.isItem) updateItemFromMesh(mesh);
+    else if (mesh.userData.isDoor) updateDoorFromMesh(mesh);
+}
+
+// --- Global Helpers ---
+
+window.handleUpload = async (input, targetProp) => {
+  if (!input.files || input.files.length === 0) return;
+  const file = input.files[0];
+  
+  showLoading(true);
+  try {
+    console.log("Uploading...", file.name);
+    // Determine folder based on extension
+    const folder = file.name.endsWith('.mp4') ? 'videos' : 'models';
+    
+    const roomSlug = (currentMode === 'room' && currentData?.name) ? currentData.name.toLowerCase().replace(/\s+/g,'-') : 'hub';
+    const result = await storageService.upload(file, folder, { roomSlug, itemId: 'model' });
+    
+    // Update the property
+    if (currentData) {
+       // We use the relative path strategy if we want to stay clean, 
+       // but the service returns absolute URLs.
+       // Let's use the returned Global URL directly for now, or strip domain if we want to use CONFIG resolution.
+       // For flexibility, let's store what the service gave us (usually the public URL).
+       
+       // If we want to support the CONFIG.resolveAsset logic, we might want to store: "models/filename.glb"
+       // The service mock returns "https://mock.../models/..."
+       // Let's just use the full URL returned.
+       
+       updateProp(targetProp, result.globalUrl);
+       document.getElementById('prop-model').value = result.globalUrl;
+       
+       // Reload scene to show new model
+       await loadScene();
+    }
+  } catch (e) {
+    console.error("Upload failed", e);
+    alert("Upload failed: " + e.message);
+  } finally {
+    showLoading(false);
+    input.value = ''; // Reset
+  }
+};
+
+window.addNewRoom = () => {
+  if (currentMode !== 'hub') {
+    alert("Please switch to Hub view first.");
+    selectHub();
+    return;
+  }
+  
+  transformControl.detach();
+  isPlacingNewRoomDoor = true;
+  const overlay = document.getElementById('loading-overlay');
+  overlay.innerText = "Click on the floor to place the door for the new room. Press ESC to cancel.";
+  overlay.classList.add('visible');
+  overlay.style.pointerEvents = 'none'; // Allow clicking through
+};
+
+window.updateProp = (prop, val) => {
+  if (!currentData) return;
+  currentData[prop] = val;
+  if (prop === 'name') renderStructureList();
+};
+
+window.addNewItem = async () => {
+  if (currentMode !== 'room') return;
+  currentData.items = currentData.items || [];
+  
+  const newItem = {
+    type: 'collectible',
+    title: 'New Item',
+    position: {x:0, y:1, z:0},
+    isObjective: false
+  };
+  
+  // Create in backend to obtain ID
+  try {
+    const room_id = currentData.id;
+    const res = await fetch('/api/admin/items', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ room_id, title: newItem.title, type: newItem.type, transform: { position: newItem.position, rotation: {x:0,y:0,z:0}, scale: {x:1,y:1,z:1} }, isObjective: newItem.isObjective })
+    });
+    if (res.ok) {
+      const { id } = await res.json();
+      newItem.id = id;
+    } else {
+      newItem.id = 'item-'+Date.now();
+    }
+  } catch {
+    newItem.id = 'item-'+Date.now();
+  }
+
+  currentData.items.push(newItem);
+  renderItemsList();
+  
+  const loader = new GLTFLoader();
+  const mesh = await loadItemMesh(newItem, loader);
+  transformControl.attach(mesh);
+};
+
+window.deleteItem = (idx) => {
+  if (currentMode !== 'room') return;
+  
+  const item = currentData.items[idx];
+  
+  if (item.id) {
+      fetch(`/api/admin/items/${item.id}`, { method: 'DELETE' })
+          .catch(e => console.warn("Failed to delete item", e));
+  }
+
+  const entry = loadedMeshes.find(e => e.dataRef === item);
+  if (entry) {
+    if (transformControl.object === entry.mesh) transformControl.detach();
+    scene.remove(entry.mesh);
+    loadedMeshes = loadedMeshes.filter(e => e !== entry);
+  }
+  
+  currentData.items.splice(idx, 1);
+  renderItemsList();
+};
+
+window.updateItemField = (idx, field, value) => {
+  if (currentMode !== 'room') return;
+  const item = currentData.items[idx];
+  if (!item) return;
+  if (field === 'isObjective') {
+    item.isObjective = !!value;
+  } else if (field === 'objectiveText') {
+    item.objectiveText = value;
+  } else if (field === 'title') {
+    item.title = value;
+  } else if (field === 'type') {
+    item.type = value;
+  }
+  renderItemsList();
+  // Persist metadata
+  saveItemToBackend(item).catch(e => console.warn('Failed to save item meta', e));
+};
+
+window.uploadItemMedia = async (idx, input) => {
+  if (!input.files || input.files.length === 0) return;
+  const file = input.files[0];
+  const item = currentData.items[idx];
+  if (!item) return;
+  showLoading(true);
+  try {
+    const folder = file.type.startsWith('video/') ? 'videos' : (file.type.startsWith('image/') ? 'images' : 'docs');
+    const roomSlug = currentData?.name ? currentData.name.toLowerCase().replace(/\s+/g,'-') : 'room';
+    const result = await storageService.upload(file, folder, { roomSlug, itemId: item.id });
+    item.mediaUrl = result.globalUrl;
+    renderItemsList();
+    await loadScene();
+    await saveItemToBackend(item);
+  } catch (e) {
+    console.error('Item media upload failed', e);
+    alert('Upload failed: ' + e.message);
+  } finally {
+    showLoading(false);
+    input.value = '';
+  }
+};
+
+window.previewItemMedia = (idx) => {
+  const item = currentData.items[idx];
+  if (!item || !item.mediaUrl) return;
+  window.open(item.mediaUrl, '_blank');
+};
+
+async function saveItemToBackend(item) {
+  const payload = {
+    id: item.id,
+    room_id: currentData.id,
+    title: item.title ?? '',
+    type: item.type,
+    media_url: item.mediaUrl ?? '',
+    transform: {
+      position: item.position,
+      rotation: item.rotation || { x: 0, y: 0, z: 0 },
+      scale: (typeof item.scale === 'number') ? { x: item.scale, y: item.scale, z: item.scale } : (item.scale || { x: 1, y: 1, z: 1 })
+    },
+    isObjective: !!(item.isObjective || item.objective),
+    objective_text: item.objectiveText || item.objective_text || ''
+  };
+  const res = await fetch('/api/admin/items', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  if (!res.ok) throw new Error(`Save failed: ${res.status}`);
+}
+window.focusContent = (idx, type) => {
+   let dataRef;
+   if (type === 'door') dataRef = hubData.doors[idx];
+   else dataRef = currentData.items[idx];
+   
+   const entry = loadedMeshes.find(e => e.dataRef === dataRef);
+   if(entry) {
+       transformControl.attach(entry.mesh);
+       camera.position.set(entry.mesh.position.x + 2, entry.mesh.position.y + 2, entry.mesh.position.z + 2);
+       camera.lookAt(entry.mesh.position);
+   }
+};
+
+window.deleteRoom = () => {
+  if (currentMode !== 'room') return;
+  if (confirm('Delete this room?')) {
+    if (currentData.id) {
+        fetch(`/api/admin/rooms/${currentData.id}`, { method: 'DELETE' })
+            .catch(e => console.warn("Failed to delete room", e));
+    }
+
+    roomsData.rooms = roomsData.rooms.filter(r => r.id !== currentData.id);
+    
+    // SYNC DOORS
+    syncHubDoors();
+    
+    selectHub(); // Go back to hub
+  }
+};
+
+window.saveToDatabase = async () => {
+  showLoading(true);
+  try {
+    console.log("Saving to DB...");
+    await dbService.saveRoomsData(roomsData);
+    await dbService.saveHubData(hubData);
+    alert("Saved to Database!");
+  } catch (e) {
+    console.error("Save failed", e);
+    alert("Save failed: " + e.message);
+  } finally {
+    showLoading(false);
+  }
+};
+
+
+function showLoading(visible) {
+  if(visible) loadingOverlay.classList.add('visible');
+  else loadingOverlay.classList.remove('visible');
+}
+
+// Start
+init();
+
+</script>
+</body>
+</html>

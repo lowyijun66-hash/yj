@@ -1,0 +1,11 @@
+{
+  "modelUrl": "/assets/models/backrooms_again.glb",
+  "doors": [
+    {
+      "id": "door-1",
+      "roomId": "room-1",
+      "position": { "x": 2, "y": 0, "z": -5 },
+      "rotation": { "x": 0, "y": 0, "z": 0 }
+    }
+  ]
+}
