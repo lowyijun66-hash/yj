@@ -22,7 +22,7 @@ jobs:
           node-version: 24
 
       - name: Deploy with Wrangler
-        uses: cloudflare/wrangler-action@v4
+        uses: cloudflare/wrangler-action@v3
         with:
           command: deploy
           workingDirectory: cloudflare/worker
